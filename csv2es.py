@@ -6,8 +6,9 @@ import json
 import time
 import Queue
 import threading
+import pdb
 
-def prepare_data(index_name, index_schema, lines):
+def prepare_data(index_name, index_schema, lines, headers):
 	try:
 		prepare_data.document_counter += 1
 	except AttributeError:
@@ -15,12 +16,14 @@ def prepare_data(index_name, index_schema, lines):
 	docid=prepare_data.document_counter = 0
 	out=""
 	for line in lines:
+		vals = line.split(",")
+		obj = dict(zip(headers,vals))
 		out+='{"index":{"_index":"'+index_name+'","_type":"'+index_schema+'","_id":"'+str(docid)+'"}}\n'
-		out+=json.dumps(line)
+		out+=json.dumps(obj)
 	return out
 
 
-def submit_lines(hosts, index_name, index_schema, lines): 
+def submit_lines(hosts, index_name, index_schema, lines, headers): 
 	req=None
 	try:
 		submit_lines.batch_counter += 1
@@ -29,7 +32,7 @@ def submit_lines(hosts, index_name, index_schema, lines):
 		submit_lines.batch_counter = 0
 		submit_lines.docs_counter = 0
 		submit_lines.start_time = time.time()
-	out=prepare_data(index_name, index_schema, lines)
+	out=prepare_data(index_name, index_schema, lines, headers)
 	host=""
 	for i in range(10):
 		try:
@@ -46,12 +49,13 @@ def submit_lines(hosts, index_name, index_schema, lines):
 			continue
 	
 	raise Exception("Can't upload data to "+host)
-task_queue = Queue.Queue(20)
-num_worker_threads=10
+
+task_queue = Queue.Queue(50)
+num_worker_threads=20
 def worker():
     while True:
         item = task_queue.get()
-        submit_lines(item["hosts"],item["index_name"],item["index_schema"],item["lines"])
+        submit_lines(item["hosts"],item["index_name"],item["index_schema"],item["lines"], item["headers"])
         task_queue.task_done()
 
 def start_workers():
@@ -75,23 +79,20 @@ def main(argv):
 	batch_size = int(argv[4])
 	hosts = argv[5:]
 	hosts = [host+"/_bulk" for host in hosts]
+	headers=[]
 	print ("Using elastic search hosts: "+",".join(hosts))
 	host=""
 
 	start_workers()
 
 	with open(input_file, "r") as csvfile:
-		reader = csv.DictReader( csvfile, delimiter="," )
-		for line in reader:
-			i=i+1
-			lines+=[line]
-			if (i%batch_size==0):
-				i=0
-				batch=batch+1
-				print(batch)
-				#submit_lines(hosts,index_name,index_schema,lines)
-				task_queue.put({"hosts":hosts,"index_name":index_name,"index_schema":index_schema,"lines":lines})
-				lines=[]
+		headers = csvfile.readline().split(",")
+		while True:
+			lines=csvfile.readlines(batch_size)
+			batch=batch+1
+			print(batch)
+			#submit_lines(hosts,index_name,index_schema,lines)
+			task_queue.put({"hosts":hosts,"index_name":index_name,"index_schema":index_schema,"lines":lines,"headers":headers})
 	if (len(lines)>0):
 		submit_lines(hosts,index_name,index_schema,lines)
 	task_queue.join()
