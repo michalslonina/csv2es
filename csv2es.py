@@ -1,62 +1,57 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 import requests
 import sys
 import csv
 import json
 import time
-import Queue
+import multiprocessing
+import queue
 import threading
-import pdb
 
-def prepare_data(index_name, index_schema, lines, headers):
-	try:
-		prepare_data.document_counter += 1
-	except AttributeError:
-		prepare_data.document_counter = 0
-	docid=prepare_data.document_counter = 0
+def prepare_data(index_name, index_schema, lines, headers, offset):
+	docid=offset
 	out=""
 	for line in lines:
 		vals = line.split(",")
 		obj = dict(zip(headers,vals))
 		out+='{"index":{"_index":"'+index_name+'","_type":"'+index_schema+'","_id":"'+str(docid)+'"}}\n'
 		out+=json.dumps(obj)
+		docid=docid+1
 	return out
 
 
-def submit_lines(hosts, index_name, index_schema, lines, headers): 
+def submit_lines(hosts,index_name,index_schema,lines,headers,offset): 
 	req=None
-	try:
-		submit_lines.batch_counter += 1
-		submit_lines.docs_counter += len(lines)
-	except AttributeError:
-		submit_lines.batch_counter = 0
-		submit_lines.docs_counter = 0
-		submit_lines.start_time = time.time()
-	out=prepare_data(index_name, index_schema, lines, headers)
+	out=prepare_data(index_name, index_schema, lines, headers, offset)
 	host=""
 	for i in range(10):
 		try:
-			hostnr = submit_lines.batch_counter % (len(hosts)) 
+			hostnr = (offset*61) % (len(hosts)) 
 			host = hosts[hostnr]
 			req = requests.post(host, out)
 			if (req.status_code!=200):
 				print ("Can't upload data to "+host+"."+req.text+". Will retry...")
 				raise Exception("Can't upload data to "+host,req.text)
-			secs_since_start = time.time() - submit_lines.start_time
-			print ("Submited batch "+str(submit_lines.batch_counter)+". Speed "+str(submit_lines.docs_counter/secs_since_start)+" docs/s.")
-			return
+			return 0
 		except Exception:
-			continue
+			if (i<10):
+				continue
+			else:
+				raise
 	
-	raise Exception("Can't upload data to "+host)
+	return len(lines)
 
-task_queue = Queue.Queue(50)
+task_queue=queue.Queue(20)
+
 num_worker_threads=20
+
+pool = multiprocessing.Pool(10)
+
 def worker():
-    while True:
-        item = task_queue.get()
-        submit_lines(item["hosts"],item["index_name"],item["index_schema"],item["lines"], item["headers"])
-        task_queue.task_done()
+	while True:
+		item = task_queue.get()
+		pool.apply(submit_lines,item)
+		task_queue.task_done()
 
 def start_workers():
 	for i in range(num_worker_threads):
@@ -64,6 +59,8 @@ def start_workers():
 		t.daemon = True
 		t.start()
 	
+
+
 
 def main(argv):
 	if (len(argv)<3):
@@ -84,18 +81,26 @@ def main(argv):
 	host=""
 
 	start_workers()
+	start_time=time.time()
+	
 
+	docs_count = 0
 	with open(input_file, "r") as csvfile:
 		headers = csvfile.readline().split(",")
 		while True:
 			lines=csvfile.readlines(batch_size)
+			if (len(lines)==0):
+				break
 			batch=batch+1
 			print(batch)
 			#submit_lines(hosts,index_name,index_schema,lines)
-			task_queue.put({"hosts":hosts,"index_name":index_name,"index_schema":index_schema,"lines":lines,"headers":headers})
-	if (len(lines)>0):
-		submit_lines(hosts,index_name,index_schema,lines)
+			task_queue.put([hosts,index_name,index_schema,lines,headers,docs_count])
+			docs_count = docs_count + len(lines)
 	task_queue.join()
+	pool.close()
+	pool.join()
+	elapsed_time = time.time()-start_time
+	print ("Submited "+str(lines)+" documents with speed of "+str(docs_count/elapsed_time)+"docs/s.")
 
 if __name__ == "__main__":
 	main(sys.argv)
